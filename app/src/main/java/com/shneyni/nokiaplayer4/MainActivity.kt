@@ -70,6 +70,7 @@ import androidx.compose.foundation.border
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.vector.PathParser
 import androidx.activity.OnBackPressedCallback
@@ -105,6 +106,7 @@ private fun Tx(t: String, size: Float, color: Color = Color.White, mod: Modifier
         overflow = TextOverflow.Ellipsis, modifier = mod, textAlign = align)
 
 private class Art(val main: ImageBitmap, val blur: ImageBitmap)
+private class ResumeAsk(val id: String, val pos: Long, val title: String)
 
 /** אייקונים מצוירים בסגנון מודרני: bt, clock, batt, wifi, sig, shuffle, repeat, prev, next, play, pause */
 @Composable
@@ -207,6 +209,7 @@ private val ICON_REPEAT = listOf(
 private val ICON_BACK = listOf(
     "M23.12,9.91,19.25,6a1,1,0,0,0-1.42,0h0a1,1,0,0,0,0,1.41L21.39,11H1a1,1,0,0,0-1,1H0a1,1,0,0,0,1,1H21.45l-3.62,3.61a1,1,0,0,0,0,1.42h0a1,1,0,0,0,1.42,0l3.87-3.88A3,3,0,0,0,23.12,9.91Z")            // viewBox 24 — "אחורה"
 private val ICON_CHECK = listOf("M9,16.17L4.83,12l-1.42,1.41L9,19,21,7l-1.41-1.41z")   // viewBox 24 — "בחר/פתח"
+private val ICON_CLOSE = listOf("M19,6.41L17.59,5,12,10.59,6.41,5,5,6.41,10.59,12,5,17.59,6.41,19,12,13.41,17.59,19,19,17.59,13.41,12z")   // "איקס"
 private const val NOTE_D = "M2129.49 1251.58C1894.21 1266.37 1853.45 1407.62 1841.22 1486.87 1829 1566.13 1908.89 1742.05 2056.12 1727.11 2203.36 1712.16 2259.22 1618.7 2281.7 1523.69 2300.65 1298.71 2295.72 1184.89 2285.86 760.118 2486.92 721.749 2386.36 779.281 2560 784.123"
 
 /** מצייר סמל SVG. one=true מוסיף "1" במרכז (חזרה על שיר אחד). */
@@ -262,6 +265,8 @@ class MainActivity : ComponentActivity(), KeyActions {
     private val cur: String? get() = stack.lastOrNull()
     private var notice by mutableStateOf("")
     private var crashLines: List<String> = emptyList()
+    private var resumeAsk by mutableStateOf<ResumeAsk?>(null)
+    private var noPromptUntil = 0L
     private var artMain by mutableStateOf<ImageBitmap?>(null)
     private var artBlur by mutableStateOf<ImageBitmap?>(null)
     private var optSong: Song? = null
@@ -296,6 +301,17 @@ class MainActivity : ComponentActivity(), KeyActions {
             val c = try { f.get() } catch (e: Exception) { showNotice("חיבור לשירות הנגינה נכשל"); return@addListener }
             ctl = c
             c.addListener(object : Player.Listener {
+                override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                    if (mediaItem == null || !Cfg.resumePrompt) return
+                    if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT) return
+                    if (SystemClock.uptimeMillis() < noPromptUntil) return
+                    if (!lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) return
+                    val saved = ResumeStore.get(this@MainActivity, mediaItem.mediaId) ?: return
+                    val cc = ctl ?: return
+                    if (cc.currentPosition > 5000) return
+                    cc.pause()
+                    resumeAsk = ResumeAsk(mediaItem.mediaId, saved, mediaItem.mediaMetadata.title?.toString() ?: "—")
+                }
                 override fun onEvents(p: Player, e: Player.Events) {
                     tick++
                     if (e.contains(Player.EVENT_PLAYBACK_STATE_CHANGED) && p.playbackState == Player.STATE_ENDED &&
@@ -361,6 +377,7 @@ class MainActivity : ComponentActivity(), KeyActions {
     private fun isLR(k: Int) = k == KeyEvent.KEYCODE_DPAD_LEFT || k == KeyEvent.KEYCODE_DPAD_RIGHT
 
     override fun onKeyDown(k: Int, e: KeyEvent): Boolean {
+        if (resumeAsk != null) return true
         if (isSoft(k)) return true
         if (cur == "search" && handleSearchKey(k, e)) return true
         if (cur != "search" && (k == KeyEvent.KEYCODE_POUND || k == KeyEvent.KEYCODE_STAR)) {
@@ -372,6 +389,13 @@ class MainActivity : ComponentActivity(), KeyActions {
     }
 
     override fun onKeyUp(k: Int, e: KeyEvent): Boolean {
+        if (resumeAsk != null) {
+            when (k) {
+                KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> answerResume(true)
+                KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_SOFT_RIGHT -> answerResume(false)
+            }
+            return true
+        }
         if (cur == "eqmanual" && isLR(k)) return true
         if (cur != "search" && (k == KeyEvent.KEYCODE_POUND || k == KeyEvent.KEYCODE_STAR)) return true
         when (k) {
@@ -431,6 +455,15 @@ class MainActivity : ComponentActivity(), KeyActions {
         showNotice(if (on) "ערבוב פעיל" else "ערבוב כבוי")
     }
 
+    /** תשובה לשאלת ההמשך: כן = למקום שעצרתי, לא = מההתחלה */
+    private fun answerResume(yes: Boolean) {
+        val ask = resumeAsk ?: return
+        resumeAsk = null
+        val c = ctl ?: return
+        if (c.currentMediaItem?.mediaId == ask.id) c.seekTo(if (yes) ask.pos else 0L)
+        c.play()
+    }
+
     private fun togglePlay() { ctl?.let { if (it.isPlaying) it.pause() else it.play() } }
 
     private fun push(k: String) {
@@ -454,6 +487,7 @@ class MainActivity : ComponentActivity(), KeyActions {
         "set:input" -> if (Cfg.t9) 0 else 1
         "set:lang" -> if (Cfg.inputHe) 0 else 1
         "set:dbl" -> Cfg.dblIdx
+        "set:resume" -> if (Cfg.resumePrompt) 1 else 0
         "eq" -> if (Cfg.eqPreset < 0) presets.size else Cfg.eqPreset
         "nowplaying" -> ctl?.currentMediaItemIndex ?: 0
         else -> 0
@@ -539,7 +573,8 @@ class MainActivity : ComponentActivity(), KeyActions {
             "אקראי" to { push("set:shuffle") }, "מהירות השמעה" to { push("set:speed") },
             "אקוליייזר" to { push("eq") }, "הגדרת שניות לדילוג" to { push("set:skip") },
             "שיטת קלט בחיפוש" to { push("set:input") }, "שפת קלט בחיפוש" to { push("set:lang") },
-            "חלון לחיצה כפולה" to { push("set:dbl") }))
+            "חלון לחיצה כפולה" to { push("set:dbl") },
+            "המשך משירים ארוכים" to { push("set:resume") }))
         k == "set:repeat" -> pick(k, "סוג חזרה", listOf("ללא", "הכל", "שיר אחד")) { ctl?.repeatMode = RM[it] }
         k == "set:end" -> pick(k, "בסיום תור", listOf("עצור", "המשך בכל הספרייה")) { Cfg.endAction = it }
         k == "set:shuffle" -> pick(k, "אקראי", listOf("כבוי", "פעיל")) { ctl?.shuffleModeEnabled = it == 1 }
@@ -547,6 +582,7 @@ class MainActivity : ComponentActivity(), KeyActions {
         k == "set:skip" -> pick(k, "שניות לדילוג", Cfg.skipOptions.map { "$it שניות" }) { Cfg.skipIdx = it }
         k == "set:input" -> pick(k, "קלט חיפוש", listOf("T9", "Multi-Tap")) { Cfg.t9 = it == 0 }
         k == "set:lang" -> pick(k, "שפת קלט", listOf("עברית", "English")) { Cfg.inputHe = it == 0 }
+        k == "set:resume" -> pick(k, "המשך משירים ארוכים", listOf("כבוי", "פעיל")) { Cfg.resumePrompt = it == 1 }
         k == "set:dbl" -> pick(k, "חלון לחיצה כפולה", listOf("200ms", "280ms", "400ms")) { Cfg.dblIdx = it; keys.doubleWindowMs = Cfg.dbl }
         k == "eq" -> Screen("אקוליייזר", eqItems(), menu = true, ok = { selectEq(it) })
         k == "eqmanual" -> Screen("אקוליייזר – ידני", manualItems(), menu = true)
@@ -584,6 +620,7 @@ class MainActivity : ComponentActivity(), KeyActions {
                         if (sc == null || !sc.menu) SvgIcon(ICON_OPTIONS, 512f, (38 * s).dp) else SvgIcon(ICON_CHECK, 24f, (40 * s).dp)
                     }
                 }
+                resumeAsk?.let { ResumeDialog(it, s) }
             }
         }
     }
@@ -708,6 +745,26 @@ class MainActivity : ComponentActivity(), KeyActions {
                         Ico(if (c?.isPlaying == true) "pause" else "play", (84 * s).dp)
                         Ico("next", (62 * s).dp)
                     }
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun ResumeDialog(ask: ResumeAsk, s: Float) {
+        Box(Modifier.fillMaxSize().background(Color(0xB3000000)), contentAlignment = Alignment.Center) {
+            Column(Modifier.fillMaxWidth(0.92f)
+                .background(Brush.verticalGradient(listOf(Color(0xFF3A4562), Color(0xFF151A2A))), RoundedCornerShape((30 * s).dp))
+                .padding(horizontal = (28 * s).dp, vertical = (26 * s).dp),
+                horizontalAlignment = Alignment.CenterHorizontally) {
+                Tx("להמשיך מהמקום שעצרת?", 42 * s, align = TextAlign.Center, mod = Modifier.fillMaxWidth(), lines = 2)
+                Spacer(Modifier.height((14 * s).dp))
+                Tx(ask.title, 28 * s, Color(0xFFCCCCCC), align = TextAlign.Center, mod = Modifier.fillMaxWidth())
+                Tx("עצרת ב־" + fmt(ask.pos), 26 * s, Color(0xFF9A9AA0), align = TextAlign.Center, mod = Modifier.fillMaxWidth())
+                Spacer(Modifier.height((22 * s).dp))
+                Box(Modifier.fillMaxWidth().height((52 * s).dp)) {
+                    Box(Modifier.align(Alignment.CenterStart)) { SvgIcon(ICON_CLOSE, 24f, (44 * s).dp) }          // אחורה = מההתחלה
+                    Box(Modifier.align(Alignment.Center)) { SvgIcon(ICON_CHECK, 24f, (48 * s).dp, Yel) }          // אישור = המשך
                 }
             }
         }
@@ -927,6 +984,7 @@ class MainActivity : ComponentActivity(), KeyActions {
         val u = pendingUri ?: return
         if (!libLoaded && granted(audioPerm)) return           // ממתין לסיום הסריקה
         val startPos = pendingPos; pendingPos = 0L
+        if (startPos > 0) noPromptUntil = SystemClock.uptimeMillis() + 4000
         pendingUri = null
         val name = if (u.scheme == "file") u.lastPathSegment else displayName(u)
         val sz = if (u.scheme == "file") -1L else sizeOf(u)
@@ -984,13 +1042,16 @@ class MainActivity : ComponentActivity(), KeyActions {
         val saved = prefs.getString("queueIds", null)?.split(',')?.mapNotNull { byId[it] }.orEmpty()
         val queue = saved.ifEmpty { songs }
         val id = prefs.getString("mediaId", null)
-        val idx = queue.indexOfFirst { it.id.toString() == id }.coerceAtLeast(0)
-        c.setMediaItems(queue.map { it.toMediaItem() }, idx, prefs.getLong("pos", 0L))
+        var idx = queue.indexOfFirst { it.id.toString() == id }
+        val first = idx < 0                                    // אין שיר אחרון: ערבוב של כל השירים
+        val q = if (first) songs else queue
+        if (first) idx = q.indices.random()
+        noPromptUntil = SystemClock.uptimeMillis() + 4000
+        c.setMediaItems(q.map { it.toMediaItem() }, idx, if (first) 0L else prefs.getLong("pos", 0L))
         c.setPlaybackSpeed(prefs.getFloat("speed", 1f))
-        c.shuffleModeEnabled = prefs.getBoolean("shuffle", false)
+        c.shuffleModeEnabled = if (first) true else prefs.getBoolean("shuffle", false)
         c.repeatMode = prefs.getInt("repeat", Player.REPEAT_MODE_OFF)
-        c.prepare()
-        if (prefs.getBoolean("playing", false)) c.play()
+        c.prepare()                                            // לא מפעילים: ממתינים להפעלה מצד המשתמש
     }
 }
 
