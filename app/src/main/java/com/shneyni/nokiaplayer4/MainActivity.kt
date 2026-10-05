@@ -70,6 +70,8 @@ import androidx.compose.foundation.border
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.core.content.ContextCompat
+import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.graphics.vector.PathParser
 import androidx.activity.OnBackPressedCallback
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
@@ -191,6 +193,48 @@ private fun Ico(kind: String, size: Dp, color: Color = Color.White, level: Float
             }
         }
         Unit
+    }
+}
+
+// ---- סמלי SVG שסופקו (מסלולי מילוי, נצבעים בצבע הרצוי) ----
+private val ICON_OPTIONS = listOf(
+    "M480,224H32c-17.673,0-32,14.327-32,32s14.327,32,32,32h448c17.673,0,32-14.327,32-32S497.673,224,480,224z",
+    "M32,138.667h448c17.673,0,32-14.327,32-32s-14.327-32-32-32H32c-17.673,0-32,14.327-32,32S14.327,138.667,32,138.667z",
+    "M480,373.333H32c-17.673,0-32,14.327-32,32s14.327,32,32,32h448c17.673,0,32-14.327,32-32S497.673,373.333,480,373.333z")          // viewBox 512 — "אפשרויות"
+private val ICON_REPEAT = listOf(
+    "M12,2a10.032,10.032,0,0,1,7.122,3H16a1,1,0,0,0-1,1h0a1,1,0,0,0,1,1h4.143A1.858,1.858,0,0,0,22,5.143V1a1,1,0,0,0-1-1h0a1,1,0,0,0-1,1V3.078A11.981,11.981,0,0,0,.05,10.9a1.007,1.007,0,0,0,1,1.1h0a.982.982,0,0,0,.989-.878A10.014,10.014,0,0,1,12,2Z",
+    "M22.951,12a.982.982,0,0,0-.989.878A9.986,9.986,0,0,1,4.878,19H8a1,1,0,0,0,1-1H9a1,1,0,0,0-1-1H3.857A1.856,1.856,0,0,0,2,18.857V23a1,1,0,0,0,1,1H3a1,1,0,0,0,1-1V20.922A11.981,11.981,0,0,0,23.95,13.1a1.007,1.007,0,0,0-1-1.1Z")          // viewBox 24 — "חזרה על שיר"
+private val ICON_BACK = listOf(
+    "M23.12,9.91,19.25,6a1,1,0,0,0-1.42,0h0a1,1,0,0,0,0,1.41L21.39,11H1a1,1,0,0,0-1,1H0a1,1,0,0,0,1,1H21.45l-3.62,3.61a1,1,0,0,0,0,1.42h0a1,1,0,0,0,1.42,0l3.87-3.88A3,3,0,0,0,23.12,9.91Z")            // viewBox 24 — "אחורה"
+private val ICON_CHECK = listOf("M9,16.17L4.83,12l-1.42,1.41L9,19,21,7l-1.41-1.41z")   // viewBox 24 — "בחר/פתח"
+private const val NOTE_D = "M2129.49 1251.58C1894.21 1266.37 1853.45 1407.62 1841.22 1486.87 1829 1566.13 1908.89 1742.05 2056.12 1727.11 2203.36 1712.16 2259.22 1618.7 2281.7 1523.69 2300.65 1298.71 2295.72 1184.89 2285.86 760.118 2486.92 721.749 2386.36 779.281 2560 784.123"
+
+/** מצייר סמל SVG. one=true מוסיף "1" במרכז (חזרה על שיר אחד). */
+@Composable
+private fun SvgIcon(paths: List<String>, vb: Float, size: Dp, color: Color = Color.White, one: Boolean = false) {
+    val parsed = remember(paths) { paths.map { PathParser().parsePathString(it).toPath() } }
+    Canvas(Modifier.size(size)) {
+        val sc = this.size.width / vb
+        withTransform({ scale(sc, sc, Offset.Zero) }) {
+            parsed.forEach { drawPath(it, color) }
+            if (one) drawPath(Path().apply { moveTo(10.0f, 10.3f); lineTo(12.4f, 8.4f); lineTo(12.4f, 15.8f) },
+                color, style = Stroke(width = vb / 24f * 1.8f, cap = StrokeCap.Round, join = StrokeJoin.Round))
+        }
+    }
+}
+
+/** סמל האפליקציה (התו על רקע צהוב-כתום), מצויר ישירות, זהה לסמל המשגר */
+@Composable
+private fun AppIcon(size: Dp, corner: Dp) {
+    val note = remember { PathParser().parsePathString(NOTE_D).toPath() }
+    Canvas(Modifier.size(size).clip(RoundedCornerShape(corner))) {
+        val sc = this.size.width / 108f
+        drawRect(Brush.linearGradient(0f to Color(0xFFFFFF00), 0.83f to Color(0xFFFFC000), 1f to Color(0xFFFFC000),
+            start = Offset(0f, this.size.height), end = Offset(this.size.width, 0f)))
+        withTransform({ scale(sc, sc, Offset.Zero); translate(-54.4794f, -7.0197f); scale(0.049309f, 0.049309f, Offset.Zero) }) {
+            drawPath(note, Color(0xFF042433),
+                style = Stroke(width = 137.5f, cap = StrokeCap.Round, join = StrokeJoin.Miter, miter = 8f))
+        }
     }
 }
 
@@ -332,7 +376,7 @@ class MainActivity : ComponentActivity(), KeyActions {
         if (cur != "search" && (k == KeyEvent.KEYCODE_POUND || k == KeyEvent.KEYCODE_STAR)) return true
         when (k) {
             KeyEvent.KEYCODE_SOFT_LEFT -> { leftAction(); return true }       // אפשרויות / בחר
-            KeyEvent.KEYCODE_MENU -> { if (cur == null) { optSong = null; push("options") }; return true }
+            KeyEvent.KEYCODE_MENU -> { leftAction(); return true }              // "open menu"
             KeyEvent.KEYCODE_SOFT_RIGHT -> { back(); return true }            // אחורה
         }
         return keys.onKeyUp(k, e) || super.onKeyUp(k, e)
@@ -535,9 +579,9 @@ class MainActivity : ComponentActivity(), KeyActions {
                     Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0x33FFFFFF)))
                     Row(Modifier.fillMaxWidth().height((68 * s).dp).padding(horizontal = (16 * s).dp),
                         verticalAlignment = Alignment.CenterVertically) {
-                        Tx("אחורה", 42 * s)
+                        SvgIcon(ICON_BACK, 24f, (40 * s).dp)
                         Spacer(Modifier.weight(1f))
-                        Tx(if (sc == null || !sc.menu) "אפשרויות" else "בחר", 42 * s)
+                        if (sc == null || !sc.menu) SvgIcon(ICON_OPTIONS, 512f, (38 * s).dp) else SvgIcon(ICON_CHECK, 24f, (40 * s).dp)
                     }
                 }
             }
@@ -623,7 +667,7 @@ class MainActivity : ComponentActivity(), KeyActions {
                 horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                 if (art != null) Image(art, null, Modifier.size((230 * s).dp).clip(RoundedCornerShape((18 * s).dp)),
                     contentScale = ContentScale.Crop)
-                else Tx("♫", 210 * s)
+                else AppIcon((230 * s).dp, (18 * s).dp)
                 Spacer(Modifier.height((8 * s).dp))
                 Tx(md?.artist?.toString() ?: "", 30 * s, Color(0xFFCCCCCC), align = TextAlign.Center, mod = Modifier.fillMaxWidth())
                 Tx(md?.albumTitle?.toString() ?: "", 24 * s, Color(0xFF9A9AA0), align = TextAlign.Center, mod = Modifier.fillMaxWidth())
@@ -647,7 +691,7 @@ class MainActivity : ComponentActivity(), KeyActions {
                         Spacer(Modifier.weight(1f))
                         Ico("shuffle", (40 * s).dp, if (c?.shuffleModeEnabled == true) Yel else Color.White)
                         Spacer(Modifier.width((12 * s).dp))
-                        Ico("repeat", (42 * s).dp, if (rep != Player.REPEAT_MODE_OFF) Yel else Color.White, flag = rep == Player.REPEAT_MODE_ONE)
+                        SvgIcon(ICON_REPEAT, 24f, (40 * s).dp, if (rep != Player.REPEAT_MODE_OFF) Yel else Color.White, one = rep == Player.REPEAT_MODE_ONE)
                     }
                     Spacer(Modifier.height((8 * s).dp))
                     Box(Modifier.fillMaxWidth().height((3 * s).dp.coerceAtLeast(2.dp)).clip(RoundedCornerShape(50))
@@ -1026,12 +1070,12 @@ class QuickPlayActivity : ComponentActivity(), KeyActions {
 
     // ---- מקשים ----
     override fun onKeyDown(k: Int, e: KeyEvent): Boolean {
-        if (k == KeyEvent.KEYCODE_SOFT_LEFT || k == KeyEvent.KEYCODE_SOFT_RIGHT) return true
+        if (k == KeyEvent.KEYCODE_SOFT_LEFT || k == KeyEvent.KEYCODE_SOFT_RIGHT || k == KeyEvent.KEYCODE_MENU) return true
         return keys.onKeyDown(k, e) || super.onKeyDown(k, e)
     }
     override fun onKeyUp(k: Int, e: KeyEvent): Boolean {
         when (k) {
-            KeyEvent.KEYCODE_SOFT_LEFT -> { openInApp(); return true }
+            KeyEvent.KEYCODE_SOFT_LEFT, KeyEvent.KEYCODE_MENU -> { openInApp(); return true }
             KeyEvent.KEYCODE_SOFT_RIGHT -> { stopAndClose(); return true }
         }
         return keys.onKeyUp(k, e) || super.onKeyUp(k, e)
@@ -1090,12 +1134,12 @@ class QuickPlayActivity : ComponentActivity(), KeyActions {
                         }
                     }
                     Spacer(Modifier.height((8 * s).dp))
-                    Ico(if (p?.isPlaying == true) "pause" else "play", (80 * s).dp)
+                    AppIcon((86 * s).dp, (20 * s).dp)
                     Spacer(Modifier.height((14 * s).dp))
                     Row(Modifier.fillMaxWidth()) {
-                        Tx("אחורה", 38 * s)
+                        SvgIcon(ICON_BACK, 24f, (38 * s).dp)
                         Spacer(Modifier.weight(1f))
-                        Tx("פתח", 38 * s)
+                        SvgIcon(ICON_CHECK, 24f, (38 * s).dp)
                     }
                 }
             }
