@@ -1,6 +1,8 @@
 package com.shneyni.nokiaplayer4
 
 import android.content.Intent
+import android.os.Handler
+import android.os.Looper
 import android.media.audiofx.Equalizer
 import android.os.Bundle
 import androidx.media3.common.AudioAttributes
@@ -34,6 +36,22 @@ class PlaybackService : MediaSessionService() {
         player.addListener(object : Player.Listener {
             override fun onAudioSessionIdChanged(audioSessionId: Int) { eq?.release(); eq = null; applyEq() }
         })
+        player.addListener(object : Player.Listener {
+            override fun onIsPlayingChanged(isPlaying: Boolean) { if (!isPlaying) saveResume() }
+            override fun onPlaybackStateChanged(state: Int) {
+                if (state == Player.STATE_ENDED) player.currentMediaItem?.let { ResumeStore.remove(this@PlaybackService, it.mediaId) }
+            }
+            override fun onPositionDiscontinuity(old: Player.PositionInfo, new: Player.PositionInfo, reason: Int) {
+                val id = old.mediaItem?.mediaId ?: return
+                when (reason) {
+                    Player.DISCONTINUITY_REASON_AUTO_TRANSITION -> ResumeStore.remove(this@PlaybackService, id)   // נגמר: לא לשאול שוב
+                    Player.DISCONTINUITY_REASON_SKIP, Player.DISCONTINUITY_REASON_REMOVE ->
+                        if (new.mediaItem?.mediaId != id && old.positionMs >= 15_000L && ResumeStore.has(this@PlaybackService, id))
+                            ResumeStore.put(this@PlaybackService, id, old.positionMs)
+                }
+            }
+        })
+        handler.postDelayed(saver, 5000)
         session = MediaSession.Builder(this, player).setCallback(object : MediaSession.Callback {
             override fun onConnect(s: MediaSession, c: MediaSession.ControllerInfo):
                 MediaSession.ConnectionResult {
@@ -51,6 +69,19 @@ class PlaybackService : MediaSessionService() {
                     if (eq != null) SessionResult.RESULT_SUCCESS else SessionResult.RESULT_ERROR_NOT_SUPPORTED))
             }
         }).build()
+    }
+
+    private val handler = Handler(Looper.getMainLooper())
+    private val saver = object : Runnable { override fun run() { saveResume(); handler.postDelayed(this, 5000) } }
+
+    /** שירים של 10 דקות ומעלה: שומרים את המיקום (כל 5 שניות ובעצירה) כדי שאפשר יהיה להמשיך משם */
+    private fun saveResume() {
+        val item = player.currentMediaItem ?: return
+        val dur = player.duration
+        if (dur == C.TIME_UNSET || dur < 600_000L) return
+        val pos = player.currentPosition
+        if (pos > dur - 20_000L) ResumeStore.remove(this, item.mediaId)     // כמעט נגמר: נחשב כסיים
+        else if (pos >= 15_000L) ResumeStore.put(this, item.mediaId, pos)
     }
 
     private fun applyEq() {
@@ -73,11 +104,13 @@ class PlaybackService : MediaSessionService() {
 
     /** הסרת האפליקציה מהאחרונות: אם מתנגן — ממשיכים ברקע; אם לא — השירות נסגר. */
     override fun onTaskRemoved(rootIntent: Intent?) {
+        saveResume()
         val p = session?.player
         if (p == null || !p.playWhenReady || p.mediaItemCount == 0) stopSelf()
     }
 
     override fun onDestroy() {
+        handler.removeCallbacks(saver); saveResume()
         eq?.release()
         session?.run { player.release(); release() }
         session = null
