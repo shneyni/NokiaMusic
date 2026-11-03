@@ -16,7 +16,7 @@ import androidx.media3.common.C
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.source.DefaultShuffleOrder
+import androidx.media3.exoplayer.source.ShuffleOrder
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionCommand
@@ -173,7 +173,7 @@ class PlaybackService : MediaSessionService() {
         order.remove(newIdx)
         val pos = order.indexOf(player.currentMediaItemIndex)
         order.add(pos + 1, newIdx)
-        player.setShuffleOrder(DefaultShuffleOrder(order.toIntArray(), System.nanoTime()))
+        player.setShuffleOrder(ShuffleOrder.DefaultShuffleOrder(order.toIntArray(), System.nanoTime()))
     }
 
     /** שירים ארוכים (לפי ההגדרה): שומרים את המיקום (כל 5 שניות ובעצירה) כדי שאפשר יהיה להמשיך משם */
