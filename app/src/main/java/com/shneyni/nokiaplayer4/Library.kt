@@ -14,7 +14,11 @@ data class Song(
 ) {
     val folder get() = path.substringBeforeLast('/', "")
 
-    fun toMediaItem(): MediaItem = MediaItem.Builder()
+    fun toMediaItem(): MediaItem = mediaItemOf(id, uri, title, artist, album, albumId)
+}
+
+fun mediaItemOf(id: Long, uri: Uri, title: String, artist: String, album: String, albumId: Long): MediaItem =
+    MediaItem.Builder()
         .setUri(uri).setMediaId(id.toString())
         .setMediaMetadata(
             MediaMetadata.Builder().setTitle(title).setArtist(artist).setAlbumTitle(album)
@@ -22,7 +26,6 @@ data class Song(
                     Uri.parse("content://media/external/audio/albumart"), albumId))
                 .build()
         ).build()
-}
 
 object Library {
     @Volatile var loaded = false; private set
@@ -63,4 +66,25 @@ object Library {
     }
 
     fun albumLabel(id: Long) = albums.firstOrNull { it.first == id }?.second ?: "אלבום"
+
+    /** הקבוצה הבאה אחרי src (תיקייה/אלבום/אמן). null אם אין (למשל כל השירים או רשימה). */
+    fun nextGroup(src: String): Pair<String, List<Song>>? {
+        fun <T> nxt(list: List<T>, cur: T): T? {
+            val i = list.indexOf(cur)
+            return if (i < 0 || list.size < 2) null else list[(i + 1) % list.size]
+        }
+        val r: Pair<String, List<Song>>? = when {
+            src.startsWith("folder:") -> nxt(folders, src.removePrefix("folder:"))
+                ?.let { f -> "folder:$f" to songs.filter { it.folder == f } }
+            src.startsWith("album:") -> {
+                val cur = src.removePrefix("album:").toLongOrNull()
+                if (cur == null) null else nxt(albums.map { it.first }, cur)
+                    ?.let { a -> "album:$a" to songs.filter { it.albumId == a }.sortedBy { it.track } }
+            }
+            src.startsWith("artist:") -> nxt(artists, src.removePrefix("artist:"))
+                ?.let { a -> "artist:$a" to songs.filter { it.artist == a } }
+            else -> null
+        }
+        return r?.takeIf { it.second.isNotEmpty() }
+    }
 }

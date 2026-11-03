@@ -82,6 +82,18 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.database.ContentObserver
 import android.telephony.TelephonyManager
+import android.view.inputmethod.InputMethodManager
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import android.view.WindowManager
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -97,10 +109,19 @@ private val RM = listOf(Player.REPEAT_MODE_OFF, Player.REPEAT_MODE_ALL, Player.R
 private class Screen(
     val title: String?, val items: List<String>, val notes: Int = 0, val menu: Boolean = false,
     val songs: List<Song>? = null, val small: Boolean = false, val ok: (Int) -> Unit = {},
+    val field: FieldSpec? = null, val onOptions: ((Int) -> Unit)? = null,
 )
 
+/** שדה הקלדה (מקלדת המכשיר) בראש מסך */
+private class FieldSpec(
+    val hint: String, val numeric: Boolean = false, val search: Boolean = false,
+    val onChange: (String) -> Unit = {}, val onSubmit: (String) -> Unit = {},
+)
+
+private val LocalFg = compositionLocalOf { Color.White }
+
 @Composable
-private fun Tx(t: String, size: Float, color: Color = Color.White, mod: Modifier = Modifier,
+private fun Tx(t: String, size: Float, color: Color = LocalFg.current, mod: Modifier = Modifier,
                align: TextAlign? = null, lines: Int = 1) =
     Text(t, color = color, fontSize = size.sp, fontFamily = FontFamily.SansSerif, maxLines = lines,
         overflow = TextOverflow.Ellipsis, modifier = mod, textAlign = align)
@@ -110,7 +131,7 @@ private class ResumeAsk(val id: String, val pos: Long, val title: String)
 
 /** אייקונים מצוירים בסגנון מודרני: bt, clock, batt, wifi, sig, shuffle, repeat, prev, next, play, pause */
 @Composable
-private fun Ico(kind: String, size: Dp, color: Color = Color.White, level: Float = 1f,
+private fun Ico(kind: String, size: Dp, color: Color = LocalFg.current, level: Float = 1f,
                 off: Boolean = false, flag: Boolean = false) {
     Canvas(Modifier.size(size)) {
         val w = this.size.width; val h = this.size.height
@@ -214,7 +235,7 @@ private const val NOTE_D = "M2129.49 1251.58C1894.21 1266.37 1853.45 1407.62 184
 
 /** מצייר סמל SVG. one=true מוסיף "1" במרכז (חזרה על שיר אחד). */
 @Composable
-private fun SvgIcon(paths: List<String>, vb: Float, size: Dp, color: Color = Color.White, one: Boolean = false) {
+private fun SvgIcon(paths: List<String>, vb: Float, size: Dp, color: Color = LocalFg.current, one: Boolean = false) {
     val parsed = remember(paths) { paths.map { PathParser().parsePathString(it).toPath() } }
     Canvas(Modifier.size(size)) {
         val sc = this.size.width / vb
@@ -266,6 +287,14 @@ class MainActivity : ComponentActivity(), KeyActions {
     private var notice by mutableStateOf("")
     private var crashLines: List<String> = emptyList()
     private var resumeAsk by mutableStateOf<ResumeAsk?>(null)
+    private var inputText by mutableStateOf("")
+    private var typing by mutableStateOf(false)
+    private var searchScope: String? = null
+    private var ctxName: String? = null
+    private var ctxFolder: String? = null
+    private var ctxIdx = 0
+    private var ctxList: List<Song> = emptyList()
+    private var ctxSrc = ""
     private var noPromptUntil = 0L
     private var artMain by mutableStateOf<ImageBitmap?>(null)
     private var artBlur by mutableStateOf<ImageBitmap?>(null)
@@ -302,7 +331,7 @@ class MainActivity : ComponentActivity(), KeyActions {
             ctl = c
             c.addListener(object : Player.Listener {
                 override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                    if (mediaItem == null || !Cfg.resumePrompt) return
+                    if (mediaItem == null || Cfg.resumeMin <= 0) return
                     if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT) return
                     if (SystemClock.uptimeMillis() < noPromptUntil) return
                     if (!lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) return
@@ -312,11 +341,7 @@ class MainActivity : ComponentActivity(), KeyActions {
                     cc.pause()
                     resumeAsk = ResumeAsk(mediaItem.mediaId, saved, mediaItem.mediaMetadata.title?.toString() ?: "—")
                 }
-                override fun onEvents(p: Player, e: Player.Events) {
-                    tick++
-                    if (e.contains(Player.EVENT_PLAYBACK_STATE_CHANGED) && p.playbackState == Player.STATE_ENDED &&
-                        Cfg.endAction == 1 && Library.songs.isNotEmpty()) loadQueue(Library.songs, 0)
-                }
+                override fun onEvents(p: Player, e: Player.Events) { tick++ }
             })
             tryRestore(); playPending(); sendEq()
         }, MoreExecutors.directExecutor())
@@ -376,11 +401,45 @@ class MainActivity : ComponentActivity(), KeyActions {
     private fun isSoft(k: Int) = k == KeyEvent.KEYCODE_MENU || k == KeyEvent.KEYCODE_SOFT_RIGHT || k == KeyEvent.KEYCODE_SOFT_LEFT
     private fun isLR(k: Int) = k == KeyEvent.KEYCODE_DPAD_LEFT || k == KeyEvent.KEYCODE_DPAD_RIGHT
 
+    private fun isField(k: String?) = k == "search" || k?.startsWith("inp:") == true
+
+    /** במסכי הקלדה: המקלדת מקבלת את המקשים בזמן הקלדה; בין ההקלדה לרשימה עוברים בחיצים */
+    override fun dispatchKeyEvent(e: KeyEvent): Boolean {
+        val k = cur
+        if (resumeAsk == null && isField(k)) {
+            val code = e.keyCode
+            if (typing) {
+                when (code) {
+                    KeyEvent.KEYCODE_DPAD_UP -> return true
+                    KeyEvent.KEYCODE_DPAD_DOWN -> { if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) fieldNav(-1); return true }
+                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> {
+                        if (e.action == KeyEvent.ACTION_UP) k?.let { screenFor(it).field }?.let { f -> f.onSubmit(inputText) }
+                        return true
+                    }
+                }
+            } else if (code == KeyEvent.KEYCODE_DPAD_UP || code == KeyEvent.KEYCODE_DPAD_DOWN || code == KeyEvent.KEYCODE_DPAD_LEFT ||
+                code == KeyEvent.KEYCODE_DPAD_RIGHT || code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER) {
+                if (e.action == KeyEvent.ACTION_DOWN) onKeyDown(code, e) else if (e.action == KeyEvent.ACTION_UP) onKeyUp(code, e)
+                return true
+            }
+        }
+        return super.dispatchKeyEvent(e)
+    }
+
+    private fun fieldNav(delta: Int) {
+        val sc = screenFor(cur ?: return); val n = sc.items.size
+        if (typing) { if (delta < 0 && n > 0) { typing = false; sel = 0 } }
+        else if (delta > 0 && sel <= 0) typing = true
+        else sel = (sel - delta).coerceIn(0, maxOf(0, n - 1))
+    }
+
+    private fun imm() = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+    private fun hideIme() { try { imm()?.hideSoftInputFromWindow(window.decorView.windowToken, 0) } catch (_: Exception) {} }
+
     override fun onKeyDown(k: Int, e: KeyEvent): Boolean {
         if (resumeAsk != null) return true
         if (isSoft(k)) return true
-        if (cur == "search" && handleSearchKey(k, e)) return true
-        if (cur != "search" && (k == KeyEvent.KEYCODE_POUND || k == KeyEvent.KEYCODE_STAR)) {
+        if (!isField(cur) && (k == KeyEvent.KEYCODE_POUND || k == KeyEvent.KEYCODE_STAR)) {
             if (e.repeatCount == 0) { if (k == KeyEvent.KEYCODE_POUND) cycleRepeat() else toggleShuffle() }
             return true
         }
@@ -397,7 +456,7 @@ class MainActivity : ComponentActivity(), KeyActions {
             return true
         }
         if (cur == "eqmanual" && isLR(k)) return true
-        if (cur != "search" && (k == KeyEvent.KEYCODE_POUND || k == KeyEvent.KEYCODE_STAR)) return true
+        if (!isField(cur) && (k == KeyEvent.KEYCODE_POUND || k == KeyEvent.KEYCODE_STAR)) return true
         when (k) {
             KeyEvent.KEYCODE_SOFT_LEFT -> { leftAction(); return true }       // אפשרויות / בחר
             KeyEvent.KEYCODE_MENU -> { leftAction(); return true }              // "open menu"
@@ -410,11 +469,29 @@ class MainActivity : ComponentActivity(), KeyActions {
         val k = cur
         if (k == null) { optSong = null; push("options"); return }
         val sc = screenFor(k)
-        if (sc.menu) sc.ok(sel) else { optSong = sc.songs?.getOrNull(sel); push("options") }
+        val f = sc.field
+        if (f != null && typing) { f.onSubmit(inputText); return }
+        val oo = sc.onOptions
+        if (oo != null) { oo(sel); return }
+        if (sc.menu) { sc.ok(sel); return }
+        val song = sc.songs?.getOrNull(sel)
+        if (song != null) { optSong = song; ctxList = sc.songs ?: emptyList(); ctxIdx = sel; ctxSrc = k; push("sctx") }
+        else if (sc.songs == null) { optSong = null; push("options") }
+    }
+
+    /** האם בפינה השמאלית התחתונה מוצג ✓ (בחר) ולא סמל האפשרויות */
+    private fun leftIsCheck(sc: Screen?): Boolean = when {
+        sc == null -> false
+        sc.onOptions != null -> false
+        sc.field != null && typing -> true
+        else -> sc.menu
     }
 
     override fun volumeStep(delta: Int) {
-        cur?.let { k -> sel = (sel - delta).mod(maxOf(1, screenFor(k).items.size)); return }
+        cur?.let { k ->
+            if (isField(k)) { fieldNav(delta); return }
+            sel = (sel - delta).mod(maxOf(1, screenFor(k).items.size)); return
+        }
         audio.adjustStreamVolume(AudioManager.STREAM_MUSIC,
             if (delta > 0) AudioManager.ADJUST_RAISE else AudioManager.ADJUST_LOWER, 0)
         refreshVol(); tick++
@@ -436,8 +513,10 @@ class MainActivity : ComponentActivity(), KeyActions {
         if (stack.isNotEmpty()) {
             if (stack.last() == "crash") File(filesDir, "crash.txt").delete()
             stack.removeAt(stack.lastIndex); sel = selStack.removeLastOrNull() ?: 0
-        }
+            hideIme()
+        } else finish()          // במסך הראשי: יציאה מהאפליקציה (הנגינה ממשיכה ברקע)
     }
+    private fun popTo(k: String) { while (cur != null && cur != k) back() }
     /** # : חזרה על הכל (כל התיקייה/הרשימה) ← חזרה על שיר אחד ← ללא חזרה */
     private fun cycleRepeat() {
         val c = ctl ?: return
@@ -468,9 +547,26 @@ class MainActivity : ComponentActivity(), KeyActions {
 
     private fun push(k: String) {
         selStack.add(sel); stack.add(k); sel = startIdx(k)
-        if (k == "search") resetSearch()
+        if (k == "search") { inputText = ""; updateSearch("") }
+        typing = isField(k)
     }
-    private fun clearStack() { stack.clear(); selStack.clear(); sel = 0 }
+    private fun clearStack() { stack.clear(); selStack.clear(); sel = 0; typing = false; hideIme() }
+    private fun startInput(kind: String, text: String = "") { inputText = text; push("inp:$kind"); inputText = text }
+
+    private fun queueNext(song: Song) {
+        val c = ctl ?: return
+        c.sendCustomCommand(SessionCommand("queue", Bundle.EMPTY), Bundle().apply {
+            putString("op", "addnext"); putLong("id", song.id); putString("uri", song.uri.toString())
+            putString("title", song.title); putString("artist", song.artist); putString("album", song.album)
+            putLong("albumId", song.albumId) })
+        showNotice("יושמע הבא בתור")
+    }
+    private fun moveNext(index: Int) {
+        val c = ctl ?: return
+        c.sendCustomCommand(SessionCommand("queue", Bundle.EMPTY), Bundle().apply {
+            putString("op", "movenext"); putInt("from", index) })
+        showNotice("יושמע הבא בתור")
+    }
 
     private fun showNotice(m: String) {
         notice = m; handler.removeCallbacksAndMessages("n")
@@ -478,24 +574,24 @@ class MainActivity : ComponentActivity(), KeyActions {
     }
 
     // ================= מסכים =================
+    private val resumeOptions = listOf(5, 10, 15, 0)
+
     private fun startIdx(k: String): Int = when (k) {
         "set:repeat" -> RM.indexOf(ctl?.repeatMode ?: 0).coerceAtLeast(0)
         "set:end" -> Cfg.endAction
         "set:shuffle" -> if (ctl?.shuffleModeEnabled == true) 1 else 0
         "set:speed" -> Menu.speeds.indexOf(ctl?.playbackParameters?.speed ?: 1f).coerceAtLeast(0)
         "set:skip" -> Cfg.skipIdx
-        "set:input" -> if (Cfg.t9) 0 else 1
-        "set:lang" -> if (Cfg.inputHe) 0 else 1
-        "set:dbl" -> Cfg.dblIdx
-        "set:resume" -> if (Cfg.resumePrompt) 1 else 0
+        "set:resume" -> resumeOptions.indexOf(Cfg.resumeMin).let { if (it < 0) 3 else it }
+        "set:pz" -> if (Cfg.pauseAtZero) 1 else 0
         "eq" -> if (Cfg.eqPreset < 0) presets.size else Cfg.eqPreset
         "nowplaying" -> ctl?.currentMediaItemIndex ?: 0
         else -> 0
     }
 
-    private fun songScreen(title: String?, list: List<Song>) = Screen(title,
+    private fun songScreen(src: String, title: String?, list: List<Song>) = Screen(title,
         list.map { it.title }.ifEmpty { listOf("ריק") }, notes = list.size, songs = list,
-        ok = { i -> if (i < list.size) playQueue(list, i) })
+        ok = { i -> if (i < list.size) playQueue(list, i, src) })
 
     private fun menuScreen(title: String, items: List<Pair<String, () -> Unit>>) =
         Screen(title, items.map { it.first }, menu = true, ok = { i -> items.getOrNull(i)?.second?.invoke() })
@@ -510,45 +606,76 @@ class MainActivity : ComponentActivity(), KeyActions {
         k == "options" -> menuScreen("אפשרויות", listOf(
             "מושמע כעת" to { push("nowplaying") },
             "רשימות השמעה" to { push("playlists") },
-            "חיפוש" to { push("search") },
+            "חיפוש" to { searchScope = null; push("search") },
             "הוספה לרשימה" to { push("addto") },
             "הגדרה כצלצול" to { setRingtone() },
-            "הפעלת טיימר שינה" to { push("sleep") },
-            "הספרייה" to { push("library") },
+            "הפעלת טיימר שינה" to { startInput("sleep") },
+            "ספרייה" to { push("library") },
             "פרטי השיר" to { push("details") },
             "הגדרות" to { push("settings") }))
-        k == "library" -> menuScreen("הספרייה", listOf(
+        k == "library" -> menuScreen("ספרייה", listOf(
             "כל השירים" to { push("songs") }, "אמנים" to { push("artists") },
             "אלבומים" to { push("albums") }, "תיקיות" to { push("folders") }))
-        k == "songs" -> songScreen("כל השירים", Library.songs)
+        k == "songs" -> songScreen("songs", "כל השירים", Library.songs)
         k == "artists" -> Screen("אמנים", Library.artists.ifEmpty { listOf("ריק") }, menu = true,
             ok = { i -> Library.artists.getOrNull(i)?.let { push("artist:$it") } })
         k == "albums" -> Screen("אלבומים", Library.albums.map { it.second }.ifEmpty { listOf("ריק") }, menu = true,
             ok = { i -> Library.albums.getOrNull(i)?.let { push("album:${it.first}") } })
         k == "folders" -> Screen("תיקיות",
             Library.folders.map { it.split('/').takeLast(2).joinToString("/") }.ifEmpty { listOf("ריק") }, menu = true,
-            ok = { i -> Library.folders.getOrNull(i)?.let { push("folder:$it") } })
-        k.startsWith("artist:") -> songScreen(k.removePrefix("artist:"),
+            ok = { i -> Library.folders.getOrNull(i)?.let { push("folder:$it") } },
+            onOptions = { i -> Library.folders.getOrNull(i)?.let { ctxFolder = it; push("ctx:folder") } })
+        k.startsWith("artist:") -> songScreen(k, k.removePrefix("artist:"),
             Library.songs.filter { it.artist == k.removePrefix("artist:") })
-        k.startsWith("album:") -> songScreen(Library.albumLabel(k.removePrefix("album:").toLongOrNull() ?: 0),
+        k.startsWith("album:") -> songScreen(k, Library.albumLabel(k.removePrefix("album:").toLongOrNull() ?: 0),
             Library.songs.filter { it.albumId == k.removePrefix("album:").toLongOrNull() }.sortedBy { it.track })
-        k.startsWith("folder:") -> songScreen(k.substringAfterLast('/'),
+        k.startsWith("folder:") -> songScreen(k, k.substringAfterLast('/'),
             Library.songs.filter { it.folder == k.removePrefix("folder:") })
         k == "nowplaying" -> {
             val c = ctl; val n = c?.mediaItemCount ?: 0
             val t = (0 until n).map { c!!.getMediaItemAt(it).mediaMetadata.title?.toString() ?: "—" }
             Screen("מושמע כעת", t.ifEmpty { listOf("ריק") }, notes = n,
-                ok = { i -> if (i < n) { c?.seekTo(i, 0L); c?.play(); clearStack() } })
+                ok = { i -> if (i < n) { c?.seekTo(i, 0L); c?.play(); clearStack() } },
+                onOptions = { i -> if (i < n) { ctxIdx = i; push("ctx:np") } })
         }
+        k == "ctx:np" -> menuScreen("אפשרויות", listOf(
+            "הסרה ממושמע כעת" to { ctl?.removeMediaItem(ctxIdx); back() },
+            "השמע הבא בתור" to { moveNext(ctxIdx); back() }))
         k == "playlists" -> {
             val names = Playlists.names
-            Screen("רשימות השמעה", names + "＋ רשימה חדשה", notes = names.size, ok = { i ->
-                if (i < names.size) push("pl:${names[i]}")
-                else { showNotice("נוצרה ${Playlists.create()}"); Playlists.save(prefs) } })
+            Screen("רשימות השמעה", names.ifEmpty { listOf("ריק") }, notes = names.size,
+                ok = { i -> if (i < names.size) push("pl:${names[i]}") },
+                onOptions = { i -> ctxName = names.getOrNull(i); push("ctx:pl") })
         }
+        k == "ctx:pl" -> menuScreen("אפשרויות", listOf(
+            "הוספת רשימת השמעה" to { back(); startInput("newpl") },
+            "מחיקת רשימת השמעה" to { if (ctxName == null) showNotice("אין רשימה נבחרת") else push("conf:delpl") },
+            "שינוי שם רשימת השמעה" to { val n = ctxName; if (n == null) showNotice("אין רשימה נבחרת") else { back(); startInput("renpl", n) } }))
+        k == "conf:delpl" -> menuScreen("למחוק את \"${ctxName ?: ""}\"?", listOf(
+            "כן, מחק" to {
+                ctxName?.let { Playlists.delete(it); Playlists.save(prefs) }
+                popTo("playlists"); sel = sel.coerceIn(0, maxOf(0, Playlists.names.size - 1))
+                showNotice("הרשימה נמחקה") },
+            "ביטול" to { back() }))
+        k == "inp:newpl" -> Screen("רשימת השמעה חדשה", emptyList(), field = FieldSpec("שם הרשימה", onSubmit = { name ->
+            val n = Playlists.create(name); Playlists.save(prefs); back(); showNotice("נוצרה $n") }))
+        k == "inp:renpl" -> Screen("שינוי שם רשימה", emptyList(), field = FieldSpec("שם חדש", onSubmit = { name ->
+            val old = ctxName
+            if (old == null) back() else {
+                val r = Playlists.rename(old, name)
+                if (r == null) showNotice("השם כבר קיים") else { Playlists.save(prefs); back(); showNotice("השם שונה") }
+            } }))
+        k == "inp:sleep" -> Screen("טיימר שינה", listOf("ביטול טיימר"),
+            field = FieldSpec("מספר דקות", numeric = true, onSubmit = { t ->
+                val m = t.trim().toIntOrNull()
+                if (m == null || m !in 1..1440) showNotice("הקלד מספר דקות") else {
+                    setSleep(m); clearStack()
+                    showNotice(if (m == 1) "המוזיקה תעצר בעוד דקה" else "המוזיקה תעצר בעוד $m דקות")
+                } }),
+            ok = { setSleep(null); clearStack(); showNotice("הטיימר בוטל") })
         k.startsWith("pl:") -> {
             val byId = Library.songs.associateBy { it.id }
-            songScreen(k.removePrefix("pl:"), Playlists.ids(k.removePrefix("pl:")).mapNotNull { byId[it] })
+            songScreen(k, k.removePrefix("pl:"), Playlists.ids(k.removePrefix("pl:")).mapNotNull { byId[it] })
         }
         k == "addto" -> {
             val names = Playlists.names
@@ -560,30 +687,38 @@ class MainActivity : ComponentActivity(), KeyActions {
                 }
                 clearStack() })
         }
-        k == "search" -> Screen("חיפוש  ${if (searchT9) "T9" else "ABC"}  $query",
-            results.map { it.title }.ifEmpty { listOf(if (query.isEmpty()) "הקלד לחיפוש" else "אין תוצאות") },
-            notes = results.size, songs = results,
-            ok = { i -> if (i < results.size) playQueue(results, i) })
+        k == "sctx" -> menuScreen("אפשרויות", listOf(
+            "הפעל" to { if (ctxIdx < ctxList.size) playQueue(ctxList, ctxIdx, ctxSrc) },
+            "השמע הבא בתור" to { optSong?.let { queueNext(it) }; back() },
+            "הוסף לרשימת השמעה" to { push("addto") },
+            "פרטי השיר" to { push("details") }))
+        k == "ctx:folder" -> menuScreen("אפשרויות", listOf(
+            "הפעל חיפוש בתיקייה זו" to { val f = ctxFolder; back(); searchScope = f; push("search") }))
+        k == "search" -> {
+            val sc0 = searchScope
+            val items = results.map { it.title }.ifEmpty { if (inputText.isNotBlank()) listOf("אין תוצאות") else emptyList() }
+            Screen(if (sc0 != null) "חיפוש ב־" + sc0.substringAfterLast('/') else "חיפוש", items,
+                notes = results.size, songs = results,
+                ok = { i -> if (i < results.size) playQueue(results, i, if (inputText.isBlank() && sc0 != null) "folder:$sc0" else "search") },
+                field = FieldSpec("הקלד לחיפוש", search = true, onChange = { updateSearch(it) }, onSubmit = {
+                    if (results.isNotEmpty()) { typing = false; sel = 0 } else showNotice("אין תוצאות") }))
+        }
         k == "details" -> Screen("פרטי השיר", detailsLines())
-        k == "sleep" -> menuScreen("טיימר שינה",
-            Menu.sleepMinutes.map { m -> "$m דקות" to { setSleep(m); clearStack(); showNotice("טיימר: $m דקות") } } +
-                ("ביטול טיימר" to { setSleep(null); clearStack() }))
         k == "settings" -> menuScreen("הגדרות", listOf(
-            "סוג חזרה" to { push("set:repeat") }, "בסיום תור" to { push("set:end") },
+            "סוג חזרה" to { push("set:repeat") },
+            ("בסיום תור" + (if (ctl?.repeatMode == Player.REPEAT_MODE_ALL) "" else " (לא פעיל)")) to { push("set:end") },
             "אקראי" to { push("set:shuffle") }, "מהירות השמעה" to { push("set:speed") },
             "אקוליייזר" to { push("eq") }, "הגדרת שניות לדילוג" to { push("set:skip") },
-            "שיטת קלט בחיפוש" to { push("set:input") }, "שפת קלט בחיפוש" to { push("set:lang") },
-            "חלון לחיצה כפולה" to { push("set:dbl") },
-            "המשך משירים ארוכים" to { push("set:resume") }))
+            "שמור מיקום בהשמעות" to { push("set:resume") },
+            "עצירה בעוצמה 0" to { push("set:pz") }))
         k == "set:repeat" -> pick(k, "סוג חזרה", listOf("ללא", "הכל", "שיר אחד")) { ctl?.repeatMode = RM[it] }
-        k == "set:end" -> pick(k, "בסיום תור", listOf("עצור", "המשך בכל הספרייה")) { Cfg.endAction = it }
+        k == "set:end" -> pick(k, "בסיום תור (במצב חזרה על הכל)", listOf("עצור", "המשך לבא בתור", "חזור על הנוכחי")) { Cfg.endAction = it }
         k == "set:shuffle" -> pick(k, "אקראי", listOf("כבוי", "פעיל")) { ctl?.shuffleModeEnabled = it == 1 }
         k == "set:speed" -> pick(k, "מהירות השמעה", Menu.speeds.map { "${it}x" }) { ctl?.setPlaybackSpeed(Menu.speeds[it]) }
         k == "set:skip" -> pick(k, "שניות לדילוג", Cfg.skipOptions.map { "$it שניות" }) { Cfg.skipIdx = it }
-        k == "set:input" -> pick(k, "קלט חיפוש", listOf("T9", "Multi-Tap")) { Cfg.t9 = it == 0 }
-        k == "set:lang" -> pick(k, "שפת קלט", listOf("עברית", "English")) { Cfg.inputHe = it == 0 }
-        k == "set:resume" -> pick(k, "המשך משירים ארוכים", listOf("כבוי", "פעיל")) { Cfg.resumePrompt = it == 1 }
-        k == "set:dbl" -> pick(k, "חלון לחיצה כפולה", listOf("200ms", "280ms", "400ms")) { Cfg.dblIdx = it; keys.doubleWindowMs = Cfg.dbl }
+        k == "set:resume" -> pick(k, "שמור מיקום בהשמעות", listOf(
+            "שמור ברצועות ארוכות מ5 דק'", "שמור ברצועות ארוכות מ10 דק'", "שמור ברצועות ארוכות מ15 דק'", "כבוי")) { Cfg.resumeMin = resumeOptions[it] }
+        k == "set:pz" -> pick(k, "עצירה בעוצמה 0", listOf("כבוי", "פעיל")) { Cfg.pauseAtZero = it == 1 }
         k == "eq" -> Screen("אקוליייזר", eqItems(), menu = true, ok = { selectEq(it) })
         k == "eqmanual" -> Screen("אקוליייזר – ידני", manualItems(), menu = true)
         k == "crash" -> Screen("קריסה קודמת", crashLines, small = true)
@@ -594,7 +729,10 @@ class MainActivity : ComponentActivity(), KeyActions {
     @Composable
     private fun Root() {
         tick; libLoaded; Playlists.version
-        CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
+        val dark = isSystemInDarkTheme()
+        val onMenu = cur != null
+        val fg = if (onMenu && !dark) Color(0xFF111111) else Color.White
+        CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl, LocalFg provides fg) {
             BoxWithConstraints(Modifier.fillMaxSize().background(Color.Black)) {
                 val s = maxHeight.value / 815f
                 val mid = ctl?.currentMediaItem?.mediaId
@@ -603,24 +741,25 @@ class MainActivity : ComponentActivity(), KeyActions {
                     val a = withContext(Dispatchers.IO) { loadArt(item) }
                     artMain = a?.main; artBlur = a?.blur
                 }
-                Backdrop(artBlur)
+                if (onMenu) Box(Modifier.fillMaxSize().background(if (dark) Color(0xFF0B0B0D) else Color.White))
+                else Backdrop(artBlur)
                 val sc = cur?.let { screenFor(it) }
-                Column(Modifier.fillMaxSize().navigationBarsPadding()) {
+                Column(Modifier.fillMaxSize().navigationBarsPadding().imePadding()) {
                     StatusBar(s)
                     Box(Modifier.weight(1f).fillMaxWidth()) {
                         if (sc == null) PlayerView(s) else ListView(sc, s)
                         if (notice.isNotEmpty()) Box(Modifier.align(Alignment.TopCenter).fillMaxWidth()
                             .background(Gry).padding((14 * s).dp)) { Tx(notice, 38 * s, align = TextAlign.Center, mod = Modifier.fillMaxWidth()) }
                     }
-                    Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0x33FFFFFF)))
+                    Box(Modifier.fillMaxWidth().height(1.dp).background(fg.copy(alpha = 0.2f)))
                     Row(Modifier.fillMaxWidth().height((68 * s).dp).padding(horizontal = (16 * s).dp),
                         verticalAlignment = Alignment.CenterVertically) {
-                        SvgIcon(ICON_BACK, 24f, (40 * s).dp)
+                        SvgIcon(ICON_BACK, 24f, (29 * s).dp)      // בגודל סמל הערבוב (40*0.72)
                         Spacer(Modifier.weight(1f))
-                        if (sc == null || !sc.menu) SvgIcon(ICON_OPTIONS, 512f, (38 * s).dp) else SvgIcon(ICON_CHECK, 24f, (40 * s).dp)
+                        if (leftIsCheck(sc)) SvgIcon(ICON_CHECK, 24f, (40 * s).dp) else SvgIcon(ICON_OPTIONS, 512f, (38 * s).dp)
                     }
                 }
-                resumeAsk?.let { ResumeDialog(it, s) }
+                CompositionLocalProvider(LocalFg provides Color.White) { resumeAsk?.let { ResumeDialog(it, s) } }
             }
         }
     }
@@ -635,6 +774,7 @@ class MainActivity : ComponentActivity(), KeyActions {
         var wifiLvl by remember { mutableIntStateOf(0) }
         var bars by remember { mutableIntStateOf(0) }
         var noSig by remember { mutableStateOf(false) }
+        val fgc = LocalFg.current
         LaunchedEffect(Unit) {
             while (true) {
                 time = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
@@ -654,9 +794,9 @@ class MainActivity : ComponentActivity(), KeyActions {
             Ico("batt", (44 * s).dp, level = batt, flag = charging)
             Spacer(Modifier.weight(1f))
             if (sleepOn) { Ico("clock", (34 * s).dp); Spacer(Modifier.width((10 * s).dp)) }
-            Ico("bt", (34 * s).dp, color = when (btState) { 2 -> Yel; 1 -> Color.White; else -> Color(0xFF777777) }, off = btState == 0)
+            Ico("bt", (34 * s).dp, color = when (btState) { 2 -> Yel; 1 -> fgc; else -> Color(0xFF777777) }, off = btState == 0)
             Spacer(Modifier.width((10 * s).dp))
-            Ico("wifi", (36 * s).dp, color = if (wifi == 0) Color(0xFF777777) else Color.White,
+            Ico("wifi", (36 * s).dp, color = if (wifi == 0) Color(0xFF777777) else fgc,
                 level = if (wifi == 2) minOf(1f, (wifiLvl + 1) / 3f) else 0f, off = wifi == 0)
             Spacer(Modifier.width((10 * s).dp))
             Ico("sig", (34 * s).dp, level = bars / 4f, off = noSig)      // קליטה בקצה השמאלי
@@ -665,24 +805,69 @@ class MainActivity : ComponentActivity(), KeyActions {
 
     @Composable
     private fun ListView(sc: Screen, s: Float) {
+        val fg = LocalFg.current
+        val holder = remember(cur) { intArrayOf(0, 0) }          // [שורה עליונה, אותחל]
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val rowH = 100 * s
-            val rows = ((maxHeight.value - (if (sc.title != null) rowH else 0f)) / rowH).toInt().coerceAtLeast(1)
+            val hasField = sc.field != null
+            val head = (if (sc.title != null) rowH else 0f) + (if (hasField) rowH else 0f)
+            val rows = ((maxHeight.value - head) / rowH).toInt().coerceAtLeast(1)
             val n = sc.items.size
-            val start = (sel - rows / 2).coerceIn(0, maxOf(0, n - rows))
+            val fieldFocus = typing && hasField
+            val cursor = sel.coerceIn(0, maxOf(0, n - 1))
+            // גלילה בסגנון נוקיה: הסימון יורד עד קצה המסך, ורק אז הרשימה זזה
+            var top = holder[0]
+            if (holder[1] == 0) { top = cursor - rows / 2; holder[1] = 1 }
+            if (cursor < top) top = cursor else if (cursor >= top + rows) top = cursor - rows + 1
+            top = top.coerceIn(0, maxOf(0, n - rows)); holder[0] = top
             Column {
                 sc.title?.let {
                     Row(Modifier.fillMaxWidth().height(rowH.dp).background(Gry).padding(horizontal = (24 * s).dp),
-                        verticalAlignment = Alignment.CenterVertically) { Tx(it, 52 * s) }
+                        verticalAlignment = Alignment.CenterVertically) { Tx(it, 52 * s, color = fg) }
                 }
-                for (i in start until minOf(n, start + rows)) {
-                    Row(Modifier.fillMaxWidth().height(rowH.dp).background(if (i == sel) Yel else Color.Transparent)
+                sc.field?.let { FieldRow(it, rowH, s, fg) }
+                for (i in top until minOf(n, top + rows)) {
+                    val t = sc.items[i]
+                    val long = !sc.small && t.length > 20
+                    Row(Modifier.fillMaxWidth().height(rowH.dp).background(if (i == cursor && !fieldFocus) Yel else Color.Transparent)
                         .padding(horizontal = (24 * s).dp), verticalAlignment = Alignment.CenterVertically) {
-                        if (i < sc.notes) { Tx("♪", 54 * s); Spacer(Modifier.width((14 * s).dp)) }
-                        Tx(sc.items[i], (if (sc.small) 30 else 46) * s, lines = if (sc.small) 2 else 1)
+                        if (i < sc.notes) { Tx("♪", 54 * s, color = fg); Spacer(Modifier.width((14 * s).dp)) }
+                        Tx(t, (if (sc.small) 30 else if (long) 36 else 46) * s, color = fg, lines = if (sc.small || long) 2 else 1)
                     }
                 }
             }
+        }
+    }
+
+    @Composable
+    private fun FieldRow(f: FieldSpec, rowH: Float, s: Float, fg: Color) {
+        val fr = remember { FocusRequester() }
+        val fm = LocalFocusManager.current
+        val t = typing
+        LaunchedEffect(t) {
+            if (t) {
+                try { fr.requestFocus() } catch (_: Exception) {}
+                window.decorView.post { try { imm()?.showSoftInput(window.decorView, 0) } catch (_: Exception) {} }
+            } else { fm.clearFocus(); hideIme() }
+        }
+        val txt = if (t) Color.Black else fg
+        Row(Modifier.fillMaxWidth().height(rowH.dp).background(if (t) Yel else fg.copy(alpha = 0.12f))
+            .padding(horizontal = (24 * s).dp), verticalAlignment = Alignment.CenterVertically) {
+            BasicTextField(
+                value = inputText, onValueChange = { inputText = it; f.onChange(it) },
+                singleLine = true, modifier = Modifier.fillMaxWidth().focusRequester(fr),
+                textStyle = TextStyle(color = txt, fontSize = (44 * s).sp),
+                cursorBrush = SolidColor(txt),
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = if (f.numeric) KeyboardType.Number else KeyboardType.Text,
+                    imeAction = if (f.search) ImeAction.Search else ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { f.onSubmit(inputText) }, onSearch = { f.onSubmit(inputText) }),
+                decorationBox = { inner ->
+                    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
+                        if (inputText.isEmpty()) Tx(f.hint, 44 * s, txt.copy(alpha = 0.45f))
+                        inner()
+                    }
+                })
         }
     }
 
@@ -774,6 +959,10 @@ class MainActivity : ComponentActivity(), KeyActions {
     private fun currentSong() = Library.songs.firstOrNull { it.id.toString() == ctl?.currentMediaItem?.mediaId }
 
     private fun detailsLines(): List<String> {
+        optSong?.let { s ->
+            return listOf("שם: ${s.title}", "אמן: ${s.artist}", "אלבום: ${s.album}", "קובץ: ${File(s.path).name}",
+                "גודל: %.1f MB".format(s.size / 1048576.0), "פורמט: ${s.mime}", "משך: ${fmt(s.durationMs)}", "נתיב: ${s.path}")
+        }
         val c = ctl ?: return listOf("—")
         val md = c.mediaMetadata
         val uri = c.currentMediaItem?.localConfiguration?.uri
@@ -810,11 +999,12 @@ class MainActivity : ComponentActivity(), KeyActions {
         } catch (_: Exception) { showNotice("ההגדרה נכשלה") }
     }
 
-    private fun loadQueue(list: List<Song>, index: Int, pos: Long = 0L) {
+    private fun loadQueue(list: List<Song>, index: Int, pos: Long = 0L, src: String = "") {
         val c = ctl ?: return
+        prefs.edit().putString("qsrc", src).apply()          // מקור התור (לפעולת "בסיום תור")
         c.setMediaItems(list.map { it.toMediaItem() }, index, pos); c.prepare(); c.play()
     }
-    private fun playQueue(list: List<Song>, index: Int) { loadQueue(list, index); clearStack() }
+    private fun playQueue(list: List<Song>, index: Int, src: String = "") { loadQueue(list, index, 0L, src); clearStack() }
 
     private fun loadArt(item: MediaItem?): Art? {
         val uri = item?.localConfiguration?.uri ?: return null
@@ -833,50 +1023,16 @@ class MainActivity : ComponentActivity(), KeyActions {
         return Art(b.asImageBitmap(), small.asImageBitmap())
     }
 
-    // ================= חיפוש (T9 / Multi-Tap) =================
-    private var query by mutableStateOf("")
+    // ================= חיפוש (מקלדת המכשיר) =================
     private var results by mutableStateOf<List<Song>>(emptyList())
-    private var searchT9 by mutableStateOf(true)
-    private var searchHe by mutableStateOf(true)
-    private var lastDigit = ' '
-    private var lastTap = 0L
-    private var tapIdx = 0
 
-    private fun resetSearch() { query = ""; results = emptyList(); lastDigit = ' '; searchT9 = Cfg.t9; searchHe = Cfg.inputHe }
-
-    /** 0-9 מקלידים, * מחליף שפה, # מחליף T9/Multi-Tap, C/Del מוחק */
-    private fun handleSearchKey(k: Int, e: KeyEvent): Boolean {
-        if (k in KeyEvent.KEYCODE_0..KeyEvent.KEYCODE_9) {
-            if (e.repeatCount == 0) typeDigit('0' + (k - KeyEvent.KEYCODE_0)); return true
-        }
-        val first = e.repeatCount == 0
-        when (k) {
-            KeyEvent.KEYCODE_STAR -> if (first) searchHe = !searchHe
-            KeyEvent.KEYCODE_POUND -> if (first) { searchT9 = !searchT9; query = ""; lastDigit = ' '; updateSearch() }
-            KeyEvent.KEYCODE_DEL, KeyEvent.KEYCODE_CLEAR -> if (first) { query = query.dropLast(1); lastDigit = ' '; updateSearch() }
-            else -> return false
-        }
-        return true
-    }
-
-    private fun typeDigit(d: Char) {
-        if (searchT9) query += d else {
-            val chars = KeypadMap.layout(searchHe, d); if (chars.isEmpty()) return
-            val now = System.currentTimeMillis()
-            if (d == lastDigit && now - lastTap < 900 && chars.length > 1 && query.isNotEmpty()) {
-                tapIdx = (tapIdx + 1) % chars.length; query = query.dropLast(1) + chars[tapIdx]
-            } else { tapIdx = 0; query += chars[0] }
-            lastDigit = d; lastTap = now
-        }
-        updateSearch()
-    }
-
-    private fun updateSearch() {
-        val q = if (searchT9) query else KeypadMap.norm(query.trim())
-        results = if (q.isEmpty()) emptyList() else {
-            val idx = if (searchT9) Library.titleDigits else Library.titleNorm
-            Library.songs.filterIndexed { i, _ -> idx[i].contains(q) }
-        }
+    private fun updateSearch(raw: String) {
+        val q = KeypadMap.norm(raw.trim())
+        val scope = searchScope
+        val base = if (scope == null) Library.songs else Library.songs.filter { it.folder == scope }
+        results = if (q.isEmpty()) (if (scope != null) base else emptyList())
+        else base.filter { KeypadMap.norm(it.title).contains(q) || KeypadMap.norm(it.artist).contains(q) ||
+            KeypadMap.norm(it.album).contains(q) }
         sel = 0
     }
 
@@ -992,7 +1148,7 @@ class MainActivity : ComponentActivity(), KeyActions {
         var idx = songs.indexOfFirst { if (u.scheme == "file") it.path == u.path else it.uri == u }
         if (idx < 0 && name != null)
             idx = songs.indexOfFirst { File(it.path).name == name && (sz < 0 || it.size == sz) }
-        if (idx >= 0) { loadQueue(songs, idx, startPos); clearStack(); return }
+        if (idx >= 0) { loadQueue(songs, idx, startPos, "songs"); clearStack(); return }
         try { contentResolver.takePersistableUriPermission(u, Intent.FLAG_GRANT_READ_URI_PERMISSION) } catch (_: Exception) {}
         val item = MediaItem.Builder().setUri(u).setMediaId(u.toString())
             .setMediaMetadata(MediaMetadata.Builder().setTitle(name?.substringBeforeLast('.') ?: "—").build()).build()
@@ -1082,7 +1238,8 @@ class QuickPlayActivity : ComponentActivity(), KeyActions {
         uri = u
         val raw = if (u.scheme == "file") u.lastPathSegment else queryName(u)
         fileName = raw?.substringBeforeLast('.') ?: "—"
-        val p = ExoPlayer.Builder(this)
+        val p = ExoPlayer.Builder(this, DefaultRenderersFactory(this)
+                .setEnableAudioFloatOutput(true).setEnableAudioTrackPlaybackParams(true).setEnableDecoderFallback(true))
             .setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA)
                 .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC).build(), true)
             .setHandleAudioBecomingNoisy(true).build()

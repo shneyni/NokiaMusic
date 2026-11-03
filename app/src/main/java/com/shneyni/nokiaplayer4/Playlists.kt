@@ -9,12 +9,30 @@ object Playlists {
     val names get() = m.keys.toList()
     fun ids(n: String) = m[n]?.toList().orEmpty()
 
-    fun create(): String {
-        var i = m.size + 1
-        while ("רשימה $i" in m) i++
-        return "רשימה $i".also { m[it] = mutableListOf(); version++ }
+    private fun clean(s: String) = s.replace(Regex("[\\t\\r\\n]"), " ").trim()
+
+    /** יוצר רשימה. בלי שם (או שם ריק) – "רשימה N". שם קיים – מוסיף מספר. */
+    fun create(name: String? = null): String {
+        var base = clean(name ?: "")
+        if (base.isEmpty()) { var i = m.size + 1; while ("רשימה $i" in m) i++; base = "רשימה $i" }
+        var n = base; var k = 2
+        while (n in m) { n = "$base $k"; k++ }
+        m[n] = mutableListOf(); version++
+        return n
     }
     fun add(n: String, id: Long) { m[n]?.let { if (id !in it) it += id }; version++ }
+    fun delete(n: String) { m.remove(n); version++ }
+
+    /** משנה שם ושומר על הסדר. מחזיר null אם השם כבר קיים. */
+    fun rename(old: String, new: String): String? {
+        val c = clean(new)
+        if (c.isEmpty() || c == old) return old
+        if (c in m) return null
+        val entries = m.entries.map { (if (it.key == old) c else it.key) to it.value }
+        m.clear(); entries.forEach { m[it.first] = it.second }
+        version++
+        return c
+    }
 
     fun load(p: SharedPreferences) {
         m.clear()

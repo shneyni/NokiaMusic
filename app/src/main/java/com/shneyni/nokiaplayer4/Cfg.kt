@@ -4,31 +4,34 @@ import android.content.SharedPreferences
 import androidx.compose.runtime.*
 
 object Cfg {
-    var t9 by mutableStateOf(true)
-    var inputHe by mutableStateOf(true)
-    var dblIdx by mutableIntStateOf(1)
     var skipIdx by mutableIntStateOf(1)
-    var resumePrompt by mutableStateOf(true)      // לשאול "להמשיך מהמקום שעצרת?" בשירים של 10 דקות ומעלה
-    var endAction by mutableIntStateOf(0)        // 0 = עצור, 1 = המשך בכל הספרייה
-    var eqPreset by mutableIntStateOf(0)         // -1 = ידני
+    var resumeMin by mutableIntStateOf(10)        // שמירת מיקום: 5 / 10 / 15 דקות, 0 = כבוי
+    var pauseAtZero by mutableStateOf(false)      // עצירת השמעה כשהעוצמה מגיעה ל-0
+    var endAction by mutableIntStateOf(2)         // בסיום תור (במצב חזרה): 0 = עצור, 1 = המשך לבא בתור, 2 = חזור על הנוכחי
+    var eqPreset by mutableIntStateOf(0)          // -1 = ידני
     var eqManual = IntArray(5)
 
     val skipOptions = intArrayOf(3, 5, 10, 15, 30)
     val skipSec get() = skipOptions[skipIdx]
-    val dbl get() = longArrayOf(200L, 280L, 400L)[dblIdx]
+    val dbl: Long get() = 300L                    // חלון לחיצה כפולה (קבוע)
+
+    // קריאה ישירה מ-SharedPreferences (גם עבור השירות)
+    fun resumeMinFrom(p: SharedPreferences): Int =
+        if (p.contains("rmin")) p.getInt("rmin", 10) else if (p.getBoolean("rp", true)) 10 else 0
+    fun endActionFrom(p: SharedPreferences) = p.getInt("end2", 2)
+    fun pauseZeroFrom(p: SharedPreferences) = p.getBoolean("pz", false)
 
     fun load(p: SharedPreferences) {
-        t9 = p.getBoolean("t9", true); inputHe = p.getBoolean("he", true)
-        dblIdx = p.getInt("dbl", 1); skipIdx = p.getInt("skip", 1)
-        endAction = p.getInt("end", 0); eqPreset = p.getInt("eqp", 0)
-        resumePrompt = p.getBoolean("rp", true)
+        skipIdx = p.getInt("skip", 1).coerceIn(0, skipOptions.size - 1)
+        endAction = endActionFrom(p); eqPreset = p.getInt("eqp", 0)
+        resumeMin = resumeMinFrom(p); pauseAtZero = pauseZeroFrom(p)
         p.getString("eqm", null)?.split(',')?.mapNotNull { it.toIntOrNull() }
             ?.takeIf { it.size == 5 }?.let { eqManual = it.toIntArray() }
     }
 
     fun save(p: SharedPreferences) {
-        p.edit().putBoolean("t9", t9).putBoolean("he", inputHe).putInt("dbl", dblIdx)
-            .putInt("skip", skipIdx).putBoolean("rp", resumePrompt).putInt("end", endAction).putInt("eqp", eqPreset)
+        p.edit().putInt("skip", skipIdx).putInt("rmin", resumeMin).putBoolean("pz", pauseAtZero)
+            .putInt("end2", endAction).putInt("eqp", eqPreset)
             .putString("eqm", eqManual.joinToString(",")).apply()
     }
 }
